@@ -2,7 +2,7 @@ import argparse
 import os
 import time
 import urllib.request
-from typing import Callable, Sequence, Tuple
+from typing import Any, Callable, Sequence, Tuple
 
 import numpy as np
 import onnxruntime
@@ -61,6 +61,7 @@ def _build_parity_inputs(sam, image: np.ndarray):
     """Build encoder and decoder inputs from a dummy image and center-point prompt."""
     predictor = SamPredictor(sam)
 
+    # Build transformed_image explicitly so the same tensor can be used as encoder ONNX input.
     input_image = predictor.transform.apply_image(image)
     input_image_torch = torch.as_tensor(
         input_image,
@@ -122,7 +123,7 @@ def _check_outputs_close(
             )
 
 
-def _benchmark(label: str, fn: Callable[[], None], warmup: int, runs: int) -> float:
+def _benchmark(label: str, fn: Callable[[], Any], warmup: int, runs: int) -> float:
     """Benchmark a callable and return average execution time in milliseconds."""
     for _ in range(warmup):
         fn()
@@ -255,9 +256,13 @@ def export_and_validate(
         prefix="pipeline",
     )
 
+    def _pt_encoder_run():
+        with torch.no_grad():
+            encoder_model(encoder_input_image)
+
     encoder_pt_ms = _benchmark(
         "encoder.pytorch",
-        lambda: encoder_model(encoder_input_image),
+        _pt_encoder_run,
         warmup=benchmark_warmup,
         runs=benchmark_runs,
     )
@@ -268,9 +273,13 @@ def export_and_validate(
         runs=benchmark_runs,
     )
 
+    def _pt_decoder_run():
+        with torch.no_grad():
+            decoder_model(**decoder_inputs)
+
     decoder_pt_ms = _benchmark(
         "decoder.pytorch",
-        lambda: decoder_model(**decoder_inputs),
+        _pt_decoder_run,
         warmup=benchmark_warmup,
         runs=benchmark_runs,
     )
@@ -282,16 +291,17 @@ def export_and_validate(
     )
 
     def _pt_pipeline_run():
-        image_embeddings, interm_embeddings = encoder_model(encoder_input_image)
-        decoder_model(
-            image_embeddings=image_embeddings,
-            interm_embeddings=interm_embeddings,
-            point_coords=decoder_inputs["point_coords"],
-            point_labels=decoder_inputs["point_labels"],
-            mask_input=decoder_inputs["mask_input"],
-            has_mask_input=decoder_inputs["has_mask_input"],
-            orig_im_size=decoder_inputs["orig_im_size"],
-        )
+        with torch.no_grad():
+            image_embeddings, interm_embeddings = encoder_model(encoder_input_image)
+            decoder_model(
+                image_embeddings=image_embeddings,
+                interm_embeddings=interm_embeddings,
+                point_coords=decoder_inputs["point_coords"],
+                point_labels=decoder_inputs["point_labels"],
+                mask_input=decoder_inputs["mask_input"],
+                has_mask_input=decoder_inputs["has_mask_input"],
+                orig_im_size=decoder_inputs["orig_im_size"],
+            )
 
     def _ort_pipeline_run():
         image_embeddings, interm_embeddings = encoder_ort.run(None, encoder_ort_inputs)
