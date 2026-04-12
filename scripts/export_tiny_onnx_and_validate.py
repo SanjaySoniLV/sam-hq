@@ -2,7 +2,7 @@ import argparse
 import os
 import time
 import urllib.request
-from typing import Callable, Tuple
+from typing import Callable, Sequence, Tuple
 
 import numpy as np
 import onnxruntime
@@ -19,12 +19,15 @@ DEFAULT_TINY_CHECKPOINT_URL = (
 
 
 class SamTinyImageEncoderOnnxModel(nn.Module):
+    """ONNX-exportable wrapper around SAM image preprocessing + image encoder."""
+
     def __init__(self, sam_model):
         super().__init__()
         self.model = sam_model
 
     @torch.no_grad()
     def forward(self, input_image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode a transformed BCHW float image into image and intermediate embeddings."""
         preprocessed = self.model.preprocess(input_image)
         image_embeddings, interm_embeddings = self.model.image_encoder(preprocessed)
         if isinstance(interm_embeddings, list):
@@ -98,13 +101,14 @@ def _build_parity_inputs(sam, image: np.ndarray):
 
 
 def _check_outputs_close(
-    names,
-    pt_outputs,
-    ort_outputs,
+    names: Sequence[str],
+    pt_outputs: Sequence[torch.Tensor],
+    ort_outputs: Sequence[np.ndarray],
     atol: float,
     rtol: float,
     prefix: str,
 ) -> None:
+    """Validate ONNXRuntime outputs against PyTorch outputs and raise on mismatch."""
     for idx, name in enumerate(names):
         pt = _to_numpy(pt_outputs[idx])
         ort = ort_outputs[idx]
@@ -119,6 +123,7 @@ def _check_outputs_close(
 
 
 def _benchmark(label: str, fn: Callable[[], None], warmup: int, runs: int) -> float:
+    """Benchmark a callable and return average execution time in milliseconds."""
     for _ in range(warmup):
         fn()
     start = time.perf_counter()
@@ -131,6 +136,7 @@ def _benchmark(label: str, fn: Callable[[], None], warmup: int, runs: int) -> fl
 
 
 def _safe_speedup(torch_ms: float, ort_ms: float) -> str:
+    """Return torch/onnxruntime speedup as text, or 'n/a' when divisor is non-positive."""
     if ort_ms <= 0.0:
         return "n/a"
     return f"{torch_ms / ort_ms:.2f}x"
