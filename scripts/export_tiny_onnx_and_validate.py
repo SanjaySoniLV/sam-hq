@@ -38,9 +38,16 @@ def _make_dummy_circle_image(size: int = 512) -> np.ndarray:
 
 
 def _build_parity_inputs(sam, image: np.ndarray):
+    """Build SamOnnxModel-compatible inputs from a dummy image and center-point prompt."""
     predictor = SamPredictor(sam)
     predictor.set_image(image)
 
+    if predictor.features is None:
+        raise RuntimeError("SamPredictor did not produce image embeddings after set_image.")
+    if predictor.interm_features is None or len(predictor.interm_features) == 0:
+        raise RuntimeError("SamPredictor did not produce intermediate embeddings after set_image.")
+
+    # Uses SamPredictor internal cached encoder outputs after set_image.
     image_embeddings = predictor.features
     interm_embeddings = torch.stack(predictor.interm_features, dim=0)
 

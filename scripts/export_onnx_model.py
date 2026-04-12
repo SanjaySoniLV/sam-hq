@@ -137,7 +137,9 @@ def run_export(
         "point_labels": {1: "num_points"},
     }
 
+    embed_dim = sam.prompt_encoder.embed_dim
     embed_size = sam.prompt_encoder.image_embedding_size
+    # In this repository, "default" is an alias for the ViT-H backbone.
     canonical_model_type = "vit_h" if model_type == "default" else model_type
     encoder_embed_dim_dict = {"vit_b": 768, "vit_l": 1024, "vit_h": 1280, "vit_tiny": 160}
     num_interm_embeddings_dict = {"vit_b": 4, "vit_l": 4, "vit_h": 4, "vit_tiny": 1}
@@ -152,7 +154,7 @@ def run_export(
 
     mask_input_size = [4 * x for x in embed_size]
     dummy_inputs = {
-        "image_embeddings": torch.randn(1, 256, *embed_size, dtype=torch.float),
+        "image_embeddings": torch.randn(1, embed_dim, *embed_size, dtype=torch.float),
         "interm_embeddings": torch.randn(
             num_interm_embeddings,
             1,
