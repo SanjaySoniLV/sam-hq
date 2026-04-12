@@ -130,6 +130,12 @@ def _benchmark(label: str, fn: Callable[[], None], warmup: int, runs: int) -> fl
     return avg_ms
 
 
+def _safe_speedup(torch_ms: float, ort_ms: float) -> str:
+    if ort_ms <= 0.0:
+        return "n/a"
+    return f"{torch_ms / ort_ms:.2f}x"
+
+
 def export_and_validate(
     checkpoint_path: str,
     decoder_output: str,
@@ -305,17 +311,17 @@ def export_and_validate(
     print(
         "  encoder: "
         f"pytorch={encoder_pt_ms:.3f}, onnxruntime={encoder_ort_ms:.3f}, "
-        f"speedup={encoder_pt_ms / encoder_ort_ms:.2f}x"
+        f"speedup={_safe_speedup(encoder_pt_ms, encoder_ort_ms)}"
     )
     print(
         "  decoder: "
         f"pytorch={decoder_pt_ms:.3f}, onnxruntime={decoder_ort_ms:.3f}, "
-        f"speedup={decoder_pt_ms / decoder_ort_ms:.2f}x"
+        f"speedup={_safe_speedup(decoder_pt_ms, decoder_ort_ms)}"
     )
     print(
         "  pipeline: "
         f"pytorch={pipeline_pt_ms:.3f}, onnxruntime={pipeline_ort_ms:.3f}, "
-        f"speedup={pipeline_pt_ms / pipeline_ort_ms:.2f}x"
+        f"speedup={_safe_speedup(pipeline_pt_ms, pipeline_ort_ms)}"
     )
     print("Success: vit_tiny encoder+decoder ONNX export completed and validated.")
 
