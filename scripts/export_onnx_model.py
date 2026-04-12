@@ -138,20 +138,28 @@ def run_export(
     }
 
     embed_size = sam.prompt_encoder.image_embedding_size
+    canonical_model_type = "vit_h" if model_type == "default" else model_type
+    encoder_embed_dim_dict = {"vit_b": 768, "vit_l": 1024, "vit_h": 1280, "vit_tiny": 160}
+    num_interm_embeddings_dict = {"vit_b": 4, "vit_l": 4, "vit_h": 4, "vit_tiny": 1}
+    if canonical_model_type not in encoder_embed_dim_dict:
+        raise ValueError(
+            f"Unsupported model type '{model_type}'. "
+            "Expected one of: default, vit_h, vit_l, vit_b, vit_tiny."
+        )
 
-    with torch.no_grad():
-        dummy_image = torch.randn(1, 3, sam.image_encoder.img_size, sam.image_encoder.img_size)
-        image_embeddings_ref, interm_embeddings_ref = sam.image_encoder(sam.preprocess(dummy_image[0]).unsqueeze(0))
-
-    num_interm_embeddings = len(interm_embeddings_ref)
-    if num_interm_embeddings == 0:
-        raise RuntimeError("Image encoder produced no intermediate embeddings for ONNX export.")
-    interm_shape = interm_embeddings_ref[0].shape
+    encoder_embed_dim = encoder_embed_dim_dict[canonical_model_type]
+    num_interm_embeddings = num_interm_embeddings_dict[canonical_model_type]
 
     mask_input_size = [4 * x for x in embed_size]
     dummy_inputs = {
-        "image_embeddings": torch.randn_like(image_embeddings_ref, dtype=torch.float),
-        "interm_embeddings": torch.randn(num_interm_embeddings, *interm_shape, dtype=torch.float),
+        "image_embeddings": torch.randn(1, 256, *embed_size, dtype=torch.float),
+        "interm_embeddings": torch.randn(
+            num_interm_embeddings,
+            1,
+            *embed_size,
+            encoder_embed_dim,
+            dtype=torch.float,
+        ),
         "point_coords": torch.randint(low=0, high=1024, size=(1, 5, 2), dtype=torch.float),
         "point_labels": torch.randint(low=0, high=4, size=(1, 5), dtype=torch.float),
         "mask_input": torch.randn(1, 1, *mask_input_size, dtype=torch.float),
@@ -179,6 +187,7 @@ def run_export(
                 input_names=list(dummy_inputs.keys()),
                 output_names=output_names,
                 dynamic_axes=dynamic_axes,
+                dynamo=False,
             )
 
     if onnxruntime_exists:

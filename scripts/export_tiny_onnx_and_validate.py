@@ -101,6 +101,7 @@ def export_and_validate(
             input_names=list(parity_inputs.keys()),
             output_names=["masks", "iou_predictions", "low_res_masks"],
             dynamic_axes=dynamic_axes,
+            dynamo=False,
         )
 
     providers = ["CPUExecutionProvider"]
