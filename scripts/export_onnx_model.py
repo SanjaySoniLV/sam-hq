@@ -35,7 +35,7 @@ parser.add_argument(
     "--model-type",
     type=str,
     required=True,
-    help="In ['default', 'vit_h', 'vit_l', 'vit_b']. Which type of SAM model to export.",
+    help="In ['default', 'vit_h', 'vit_l', 'vit_b', 'vit_tiny']. Which type of SAM model to export.",
 )
 
 parser.add_argument(
@@ -139,13 +139,29 @@ def run_export(
 
     embed_dim = sam.prompt_encoder.embed_dim
     embed_size = sam.prompt_encoder.image_embedding_size
-    encoder_embed_dim_dict = {"vit_b":768,"vit_l":1024,"vit_h":1280}
-    encoder_embed_dim = encoder_embed_dim_dict[model_type]
+    # In this repository, "default" is an alias for the ViT-H backbone.
+    canonical_model_type = "vit_h" if model_type == "default" else model_type
+    encoder_embed_dim_dict = {"vit_b": 768, "vit_l": 1024, "vit_h": 1280, "vit_tiny": 160}
+    num_interm_embeddings_dict = {"vit_b": 4, "vit_l": 4, "vit_h": 4, "vit_tiny": 1}
+    if canonical_model_type not in encoder_embed_dim_dict:
+        raise ValueError(
+            f"Unsupported model type '{model_type}'. "
+            "Expected one of: default, vit_h, vit_l, vit_b, vit_tiny."
+        )
+
+    encoder_embed_dim = encoder_embed_dim_dict[canonical_model_type]
+    num_interm_embeddings = num_interm_embeddings_dict[canonical_model_type]
 
     mask_input_size = [4 * x for x in embed_size]
     dummy_inputs = {
         "image_embeddings": torch.randn(1, embed_dim, *embed_size, dtype=torch.float),
-        "interm_embeddings": torch.randn(4, 1, *embed_size, encoder_embed_dim, dtype=torch.float),
+        "interm_embeddings": torch.randn(
+            num_interm_embeddings,
+            1,
+            *embed_size,
+            encoder_embed_dim,
+            dtype=torch.float,
+        ),
         "point_coords": torch.randint(low=0, high=1024, size=(1, 5, 2), dtype=torch.float),
         "point_labels": torch.randint(low=0, high=4, size=(1, 5), dtype=torch.float),
         "mask_input": torch.randn(1, 1, *mask_input_size, dtype=torch.float),
@@ -173,6 +189,7 @@ def run_export(
                 input_names=list(dummy_inputs.keys()),
                 output_names=output_names,
                 dynamic_axes=dynamic_axes,
+                dynamo=False,
             )
 
     if onnxruntime_exists:
