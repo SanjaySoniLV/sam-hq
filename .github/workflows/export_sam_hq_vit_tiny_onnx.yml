@@ -29,11 +29,14 @@ jobs:
           mkdir -p artifacts
           python scripts/export_tiny_onnx_and_validate.py \
             --checkpoint /tmp/sam-hq-vit-tiny/sam_hq_vit_tiny.pth \
-            --output artifacts/sam_hq_vit_tiny.onnx
+            --output artifacts/sam_hq_vit_tiny_decoder.onnx \
+            --encoder-output artifacts/sam_hq_vit_tiny_encoder.onnx
 
-      - name: Upload ONNX artifact
+      - name: Upload ONNX artifacts
         uses: actions/upload-artifact@v4
         with:
           name: sam-hq-vit-tiny-onnx
-          path: artifacts/sam_hq_vit_tiny.onnx
+          path: |
+            artifacts/sam_hq_vit_tiny_decoder.onnx
+            artifacts/sam_hq_vit_tiny_encoder.onnx
           if-no-files-found: error
