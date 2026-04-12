@@ -35,7 +35,7 @@ parser.add_argument(
     "--model-type",
     type=str,
     required=True,
-    help="In ['default', 'vit_h', 'vit_l', 'vit_b']. Which type of SAM model to export.",
+    help="In ['default', 'vit_h', 'vit_l', 'vit_b', 'vit_tiny']. Which type of SAM model to export.",
 )
 
 parser.add_argument(
@@ -137,15 +137,21 @@ def run_export(
         "point_labels": {1: "num_points"},
     }
 
-    embed_dim = sam.prompt_encoder.embed_dim
     embed_size = sam.prompt_encoder.image_embedding_size
-    encoder_embed_dim_dict = {"vit_b":768,"vit_l":1024,"vit_h":1280}
-    encoder_embed_dim = encoder_embed_dim_dict[model_type]
+
+    with torch.no_grad():
+        dummy_image = torch.randn(1, 3, sam.image_encoder.img_size, sam.image_encoder.img_size)
+        image_embeddings_ref, interm_embeddings_ref = sam.image_encoder(sam.preprocess(dummy_image[0]).unsqueeze(0))
+
+    num_interm_embeddings = len(interm_embeddings_ref)
+    if num_interm_embeddings == 0:
+        raise RuntimeError("Image encoder produced no intermediate embeddings for ONNX export.")
+    interm_shape = interm_embeddings_ref[0].shape
 
     mask_input_size = [4 * x for x in embed_size]
     dummy_inputs = {
-        "image_embeddings": torch.randn(1, embed_dim, *embed_size, dtype=torch.float),
-        "interm_embeddings": torch.randn(4, 1, *embed_size, encoder_embed_dim, dtype=torch.float),
+        "image_embeddings": torch.randn_like(image_embeddings_ref, dtype=torch.float),
+        "interm_embeddings": torch.randn(num_interm_embeddings, *interm_shape, dtype=torch.float),
         "point_coords": torch.randint(low=0, high=1024, size=(1, 5, 2), dtype=torch.float),
         "point_labels": torch.randint(low=0, high=4, size=(1, 5), dtype=torch.float),
         "mask_input": torch.randn(1, 1, *mask_input_size, dtype=torch.float),
