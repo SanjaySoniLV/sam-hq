@@ -59,9 +59,15 @@ def _to_numpy(tensor: torch.Tensor) -> np.ndarray:
 def _load_rgb_image(image_path: str) -> np.ndarray:
     try:
         image = read_image(image_path, mode=ImageReadMode.RGB)
-    except (RuntimeError, OSError, FileNotFoundError) as exc:  # pragma: no cover
+    except FileNotFoundError as exc:  # pragma: no cover
+        raise RuntimeError(f"Image file not found at '{image_path}'.") from exc
+    except OSError as exc:  # pragma: no cover
         raise RuntimeError(
-            f"Failed to read image at '{image_path}'. Provide a valid RGB JPEG/PNG image path."
+            f"Could not open image at '{image_path}'. Check file permissions and path validity."
+        ) from exc
+    except RuntimeError as exc:  # pragma: no cover
+        raise RuntimeError(
+            f"Failed to decode image at '{image_path}'. Provide a valid RGB JPEG/PNG image path."
         ) from exc
     return image.permute(1, 2, 0).cpu().numpy()
 
@@ -183,10 +189,6 @@ def export_and_validate(
     benchmark_warmup: int,
     benchmark_runs: int,
 ) -> None:
-    if model_type not in DEFAULT_CHECKPOINT_URLS:
-        raise ValueError(
-            f"Unsupported model_type '{model_type}'. Expected one of {tuple(DEFAULT_CHECKPOINT_URLS.keys())}."
-        )
     checkpoint_url = checkpoint_url or DEFAULT_CHECKPOINT_URLS[model_type]
     _download_if_needed(checkpoint_path, checkpoint_url)
 
@@ -201,6 +203,11 @@ def export_and_validate(
     encoder_model.eval()
 
     image = _load_rgb_image(image_path)
+    if os.path.basename(image_path) != "dog.jpg":
+        print(
+            "Warning: default validation prompts are tuned for demo/input_imgs/dog.jpg; "
+            "custom images may require different prompt points."
+        )
     parity_data = _build_parity_inputs(sam, image)
     encoder_input_image = parity_data["encoder_input_image"]
     decoder_inputs = parity_data["decoder_inputs"]
@@ -416,7 +423,10 @@ def main():
         "--image",
         type=str,
         default="demo/input_imgs/dog.jpg",
-        help="Path to the JPEG image used for end-to-end parity validation.",
+        help=(
+            "Path to the JPEG image used for end-to-end parity validation. "
+            "Default prompt points are tuned for demo/input_imgs/dog.jpg."
+        ),
     )
     parser.add_argument(
         "--output",
