@@ -1,4 +1,4 @@
-name: Export sam-hq-vit-tiny ONNX
+name: Export sam-hq ONNX
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 jobs:
   export-onnx:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     permissions:
       contents: read
     steps:
@@ -28,15 +28,29 @@ jobs:
         run: |
           mkdir -p artifacts
           python scripts/export_tiny_onnx_and_validate.py \
+            --model-type vit_tiny \
             --checkpoint /tmp/sam-hq-vit-tiny/sam_hq_vit_tiny.pth \
             --output artifacts/sam_hq_vit_tiny_decoder.onnx \
-            --encoder-output artifacts/sam_hq_vit_tiny_encoder.onnx
+            --encoder-output artifacts/sam_hq_vit_tiny_encoder.onnx \
+            --image demo/input_imgs/dog.jpg
+
+      - name: Export and validate sam-hq-vit-b ONNX
+        run: |
+          mkdir -p artifacts
+          python scripts/export_tiny_onnx_and_validate.py \
+            --model-type vit_b \
+            --checkpoint /tmp/sam-hq-vit-b/sam_hq_vit_b.pth \
+            --output artifacts/sam_hq_vit_b_decoder.onnx \
+            --encoder-output artifacts/sam_hq_vit_b_encoder.onnx \
+            --image demo/input_imgs/dog.jpg
 
       - name: Upload ONNX artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: sam-hq-vit-tiny-onnx
+          name: sam-hq-onnx
           path: |
             artifacts/sam_hq_vit_tiny_decoder.onnx
             artifacts/sam_hq_vit_tiny_encoder.onnx
+            artifacts/sam_hq_vit_b_decoder.onnx
+            artifacts/sam_hq_vit_b_encoder.onnx
           if-no-files-found: error

@@ -8,14 +8,16 @@ import numpy as np
 import onnxruntime
 import torch
 from torch import nn
+from torchvision.io import ImageReadMode, read_image
 
 from segment_anything import SamPredictor, sam_model_registry
 from segment_anything.utils.onnx import SamOnnxModel
 
 
-DEFAULT_TINY_CHECKPOINT_URL = (
-    "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_tiny.pth"
-)
+DEFAULT_CHECKPOINT_URLS = {
+    "vit_tiny": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_tiny.pth",
+    "vit_b": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_b.pth",
+}
 
 
 class SamTinyImageEncoderOnnxModel(nn.Module):
@@ -38,7 +40,9 @@ class SamTinyImageEncoderOnnxModel(nn.Module):
 def _download_if_needed(checkpoint_path: str, checkpoint_url: str) -> None:
     if os.path.exists(checkpoint_path):
         return
-    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+    checkpoint_dir = os.path.dirname(checkpoint_path)
+    if checkpoint_dir:
+        os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Downloading checkpoint to {checkpoint_path} ...")
     urllib.request.urlretrieve(checkpoint_url, checkpoint_path)
 
@@ -47,18 +51,13 @@ def _to_numpy(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().cpu().numpy()
 
 
-def _make_dummy_circle_image(size: int = 512) -> np.ndarray:
-    yy, xx = np.ogrid[:size, :size]
-    center = size // 2
-    radius = size // 4
-    mask = ((xx - center) ** 2 + (yy - center) ** 2) <= radius**2
-    image = np.zeros((size, size, 3), dtype=np.uint8)
-    image[mask] = np.array([255, 255, 255], dtype=np.uint8)
-    return image
+def _load_rgb_image(image_path: str) -> np.ndarray:
+    image = read_image(image_path, mode=ImageReadMode.RGB)
+    return image.permute(1, 2, 0).cpu().numpy()
 
 
 def _build_parity_inputs(sam, image: np.ndarray):
-    """Build encoder and decoder inputs from a dummy image and center-point prompt."""
+    """Build encoder/decoder inputs and predictor reference outputs on a real image."""
     predictor = SamPredictor(sam)
 
     # Build transformed_image explicitly so the same tensor can be used as encoder ONNX input.
@@ -79,8 +78,17 @@ def _build_parity_inputs(sam, image: np.ndarray):
     interm_embeddings = torch.stack(predictor.interm_features, dim=0)
 
     h, w = image.shape[:2]
-    point_coords = torch.tensor([[[w / 2.0, h / 2.0]]], dtype=torch.float32, device=sam.device)
-    point_labels = torch.tensor([[1.0]], dtype=torch.float32, device=sam.device)
+    point_coords_unscaled = np.array(
+        [
+            [w * 0.52, h * 0.56],
+            [w * 0.70, h * 0.78],
+        ],
+        dtype=np.float32,
+    )
+    point_labels_np = np.array([1, 0], dtype=np.int64)
+    point_coords_scaled = predictor.transform.apply_coords(point_coords_unscaled, image.shape[:2])
+    point_coords = torch.as_tensor(point_coords_scaled, dtype=torch.float32, device=sam.device)[None, :, :]
+    point_labels = torch.as_tensor(point_labels_np, dtype=torch.float32, device=sam.device)[None, :]
     mask_input = torch.zeros((1, 1, 256, 256), dtype=torch.float32, device=sam.device)
     has_mask_input = torch.tensor([0.0], dtype=torch.float32, device=sam.device)
     orig_im_size = torch.tensor([float(h), float(w)], dtype=torch.float32, device=sam.device)
@@ -95,9 +103,21 @@ def _build_parity_inputs(sam, image: np.ndarray):
         "orig_im_size": orig_im_size,
     }
 
+    with torch.no_grad():
+        predictor_outputs = predictor.predict_torch(
+            point_coords=point_coords,
+            point_labels=point_labels.to(torch.int64),
+            boxes=None,
+            mask_input=None,
+            multimask_output=False,
+            return_logits=True,
+            hq_token_only=False,
+        )
+
     return {
         "encoder_input_image": input_image_torch,
         "decoder_inputs": decoder_inputs,
+        "predictor_outputs": predictor_outputs,
     }
 
 
@@ -144,20 +164,27 @@ def _safe_speedup(torch_ms: float, ort_ms: float) -> str:
 
 
 def export_and_validate(
+    model_type: str,
+    image_path: str,
     checkpoint_path: str,
     decoder_output: str,
     encoder_output: str,
-    checkpoint_url: str,
+    checkpoint_url: str | None,
     opset: int,
     atol: float,
     rtol: float,
     benchmark_warmup: int,
     benchmark_runs: int,
 ) -> None:
+    if model_type not in DEFAULT_CHECKPOINT_URLS:
+        raise ValueError(
+            f"Unsupported model_type '{model_type}'. Expected one of {tuple(DEFAULT_CHECKPOINT_URLS.keys())}."
+        )
+    checkpoint_url = checkpoint_url or DEFAULT_CHECKPOINT_URLS[model_type]
     _download_if_needed(checkpoint_path, checkpoint_url)
 
-    print("Loading vit_tiny model...")
-    sam = sam_model_registry["vit_tiny"](checkpoint=checkpoint_path)
+    print(f"Loading {model_type} model...")
+    sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
     sam.eval()
 
     decoder_model = SamOnnxModel(model=sam, hq_token_only=False, multimask_output=False)
@@ -166,9 +193,11 @@ def export_and_validate(
     encoder_model = SamTinyImageEncoderOnnxModel(sam)
     encoder_model.eval()
 
-    parity_data = _build_parity_inputs(sam, _make_dummy_circle_image())
+    image = _load_rgb_image(image_path)
+    parity_data = _build_parity_inputs(sam, image)
     encoder_input_image = parity_data["encoder_input_image"]
     decoder_inputs = parity_data["decoder_inputs"]
+    predictor_outputs = parity_data["predictor_outputs"]
 
     _ = encoder_model(encoder_input_image)
     _ = decoder_model(**decoder_inputs)
@@ -247,6 +276,14 @@ def export_and_validate(
     decoder_inputs_from_ort_encoder["image_embeddings"] = ort_encoder_outputs[0]
     decoder_inputs_from_ort_encoder["interm_embeddings"] = ort_encoder_outputs[1]
     ort_pipeline_outputs = decoder_ort.run(None, decoder_inputs_from_ort_encoder)
+    _check_outputs_close(
+        names=["masks", "iou_predictions", "low_res_masks"],
+        pt_outputs=predictor_outputs,
+        ort_outputs=ort_pipeline_outputs,
+        atol=atol,
+        rtol=rtol,
+        prefix="quality.predictor_vs_onnx_pipeline",
+    )
     _check_outputs_close(
         names=["masks", "iou_predictions", "low_res_masks"],
         pt_outputs=pt_decoder_outputs,
@@ -339,38 +376,51 @@ def export_and_validate(
         f"pytorch={pipeline_pt_ms:.3f}, onnxruntime={pipeline_ort_ms:.3f}, "
         f"speedup={_safe_speedup(pipeline_pt_ms, pipeline_ort_ms)}"
     )
-    print("Success: vit_tiny encoder+decoder ONNX export completed and validated.")
+    print(f"Success: {model_type} encoder+decoder ONNX export completed and validated.")
 
 
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Export HQ-SAM vit_tiny image encoder + mask decoder to ONNX, "
-            "validate parity with ONNXRuntime, and print performance comparison."
+            "Export HQ-SAM image encoder + mask decoder to ONNX, validate parity "
+            "against ONNXRuntime and SamPredictor on a real JPEG, and print performance."
         )
+    )
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default="vit_tiny",
+        choices=list(DEFAULT_CHECKPOINT_URLS.keys()),
+        help="HQ-SAM model type to export.",
     )
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="/tmp/sam-hq-vit-tiny/sam_hq_vit_tiny.pth",
-        help="Path to the vit_tiny checkpoint. If missing, it will be downloaded.",
+        default=None,
+        help="Path to model checkpoint. If missing, a /tmp path based on --model-type is used.",
     )
     parser.add_argument(
         "--checkpoint-url",
         type=str,
-        default=DEFAULT_TINY_CHECKPOINT_URL,
+        default=None,
         help="Checkpoint URL used when --checkpoint does not exist.",
+    )
+    parser.add_argument(
+        "--image",
+        type=str,
+        default="demo/input_imgs/dog.jpg",
+        help="Path to the JPEG image used for end-to-end parity validation.",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="/tmp/sam-hq-vit-tiny/sam_hq_vit_tiny_decoder.onnx",
+        default=None,
         help="Output ONNX file path for the mask decoder.",
     )
     parser.add_argument(
         "--encoder-output",
         type=str,
-        default="/tmp/sam-hq-vit-tiny/sam_hq_vit_tiny_encoder.onnx",
+        default=None,
         help="Output ONNX file path for the image encoder.",
     )
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version.")
@@ -389,11 +439,18 @@ def main():
         help="Number of timed runs for performance comparison.",
     )
     args = parser.parse_args()
+    checkpoint_path = args.checkpoint or f"/tmp/sam-hq-{args.model_type}/sam_hq_{args.model_type}.pth"
+    decoder_output = args.output or f"/tmp/sam-hq-{args.model_type}/sam_hq_{args.model_type}_decoder.onnx"
+    encoder_output = (
+        args.encoder_output or f"/tmp/sam-hq-{args.model_type}/sam_hq_{args.model_type}_encoder.onnx"
+    )
 
     export_and_validate(
-        checkpoint_path=args.checkpoint,
-        decoder_output=args.output,
-        encoder_output=args.encoder_output,
+        model_type=args.model_type,
+        image_path=args.image,
+        checkpoint_path=checkpoint_path,
+        decoder_output=decoder_output,
+        encoder_output=encoder_output,
         checkpoint_url=args.checkpoint_url,
         opset=args.opset,
         atol=args.atol,
