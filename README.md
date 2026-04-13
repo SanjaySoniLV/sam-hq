@@ -295,7 +295,7 @@ For end-to-end ONNX export+validation (image encoder + decoder) with parity chec
 python scripts/export_tiny_onnx_and_validate.py --model-type vit_tiny --image demo/input_imgs/dog.jpg
 python scripts/export_tiny_onnx_and_validate.py --model-type vit_b --image demo/input_imgs/dog.jpg
 ```
-Investigation note: low-quality ONNX outputs are commonly caused by feeding point
+Investigation note: incorrect ONNX segmentation masks are commonly caused by feeding point
 coordinates in original-image space directly to the decoder. Prompt coordinates
 must first be transformed with `ResizeLongestSide` into the encoder input frame
 before ONNX decoding.
