@@ -88,7 +88,7 @@ def _build_parity_inputs(sam, image: np.ndarray):
 
     h, w = image.shape[:2]
     point_coords_unscaled = np.array(
-        [[w * x_ratio, h * y_ratio] for x_ratio, y_ratio in DEFAULT_DOG_IMAGE_PROMPT_POINTS],
+        [[w * x_rel, h * y_rel] for x_rel, y_rel in DEFAULT_DOG_IMAGE_PROMPT_POINTS],
         dtype=np.float32,
     )
     point_labels_np = np.array([1, 0], dtype=np.int64)
