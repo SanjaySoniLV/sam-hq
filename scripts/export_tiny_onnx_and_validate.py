@@ -18,6 +18,10 @@ DEFAULT_CHECKPOINT_URLS = {
     "vit_tiny": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_tiny.pth",
     "vit_b": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_b.pth",
 }
+DEFAULT_PROMPT_POINTS = (
+    (0.52, 0.56),  # Positive point near the subject center in demo/input_imgs/dog.jpg.
+    (0.70, 0.78),  # Negative point near background to improve mask disambiguation.
+)
 
 
 class SamTinyImageEncoderOnnxModel(nn.Module):
@@ -79,10 +83,7 @@ def _build_parity_inputs(sam, image: np.ndarray):
 
     h, w = image.shape[:2]
     point_coords_unscaled = np.array(
-        [
-            [w * 0.52, h * 0.56],
-            [w * 0.70, h * 0.78],
-        ],
+        [[w * x_ratio, h * y_ratio] for x_ratio, y_ratio in DEFAULT_PROMPT_POINTS],
         dtype=np.float32,
     )
     point_labels_np = np.array([1, 0], dtype=np.int64)

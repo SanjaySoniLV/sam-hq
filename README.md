@@ -295,7 +295,10 @@ For end-to-end ONNX export+validation (image encoder + decoder) with parity chec
 python scripts/export_tiny_onnx_and_validate.py --model-type vit_tiny --image demo/input_imgs/dog.jpg
 python scripts/export_tiny_onnx_and_validate.py --model-type vit_b --image demo/input_imgs/dog.jpg
 ```
-Investigation note: low-quality ONNX outputs are commonly caused by feeding point coordinates in original-image space directly to the decoder. Prompt coordinates must first be transformed with `ResizeLongestSide` into the encoder input frame before ONNX decoding.
+Investigation note: low-quality ONNX outputs are commonly caused by feeding point
+coordinates in original-image space directly to the decoder. Prompt coordinates
+must first be transformed with `ResizeLongestSide` into the encoder input frame
+before ONNX decoding.
 See the [example notebook](https://colab.research.google.com/drive/11U2La49c2IxahzJkAV-EzPqEH3cz_5hq?usp=sharing) for details on how to combine image preprocessing via HQ-SAM's backbone with mask prediction using the ONNX model. It is recommended to use the latest stable version of PyTorch for ONNX export.
 
 
