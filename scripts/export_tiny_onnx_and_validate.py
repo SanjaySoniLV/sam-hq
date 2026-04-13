@@ -22,6 +22,7 @@ DEFAULT_DOG_IMAGE_PROMPT_POINTS = (
     (0.52, 0.56),  # Positive point near the subject center in demo/input_imgs/dog.jpg.
     (0.70, 0.78),  # Negative point near background to improve mask disambiguation.
 )
+DEFAULT_PROMPT_LABELS = (1, 0)  # 1=foreground point, 0=background point.
 
 
 class SamTinyImageEncoderOnnxModel(nn.Module):
@@ -58,7 +59,7 @@ def _to_numpy(tensor: torch.Tensor) -> np.ndarray:
 def _load_rgb_image(image_path: str) -> np.ndarray:
     try:
         image = read_image(image_path, mode=ImageReadMode.RGB)
-    except Exception as exc:  # pragma: no cover - defensive error handling
+    except (RuntimeError, OSError, FileNotFoundError) as exc:  # pragma: no cover
         raise RuntimeError(
             f"Failed to read image at '{image_path}'. Provide a valid RGB JPEG/PNG image path."
         ) from exc
@@ -91,7 +92,7 @@ def _build_parity_inputs(sam, image: np.ndarray):
         [[w * x_rel, h * y_rel] for x_rel, y_rel in DEFAULT_DOG_IMAGE_PROMPT_POINTS],
         dtype=np.float32,
     )
-    point_labels_np = np.array([1, 0], dtype=np.int64)
+    point_labels_np = np.array(DEFAULT_PROMPT_LABELS, dtype=np.int64)
     point_coords_scaled = predictor.transform.apply_coords(point_coords_unscaled, image.shape[:2])
     point_coords = torch.as_tensor(point_coords_scaled, dtype=torch.float32, device=sam.device)[None, :, :]
     point_labels = torch.as_tensor(point_labels_np, dtype=torch.float32, device=sam.device)[None, :]
