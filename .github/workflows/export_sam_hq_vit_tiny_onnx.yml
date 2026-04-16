@@ -89,6 +89,7 @@ jobs:
             --image demo/input_imgs/dog.jpg `
             --providers DmlExecutionProvider `
             --skip-mask-postprocessing `
+            # DirectML can exhibit larger numeric drift than CPU ORT on this model.
             --atol 5e-2 `
             --rtol 5e-2
 

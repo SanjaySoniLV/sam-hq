@@ -307,10 +307,11 @@ def export_and_validate(
     parity_reference_outputs = predictor_outputs
     if skip_mask_postprocessing:
         # In DML-safe mode the decoder emits low-res logits for both "masks" and "low_res_masks".
+        _, predictor_iou_predictions, predictor_low_res_masks = predictor_outputs
         parity_reference_outputs = (
-            predictor_outputs[2],
-            predictor_outputs[1],
-            predictor_outputs[2],
+            predictor_low_res_masks,
+            predictor_iou_predictions,
+            predictor_low_res_masks,
         )
     _check_outputs_close(
         names=["masks", "iou_predictions", "low_res_masks"],
