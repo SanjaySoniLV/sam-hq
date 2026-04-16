@@ -188,6 +188,8 @@ def export_and_validate(
     rtol: float,
     benchmark_warmup: int,
     benchmark_runs: int,
+    providers: Sequence[str],
+    skip_mask_postprocessing: bool,
 ) -> None:
     checkpoint_url = checkpoint_url or DEFAULT_CHECKPOINT_URLS[model_type]
     _download_if_needed(checkpoint_path, checkpoint_url)
@@ -196,7 +198,12 @@ def export_and_validate(
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
     sam.eval()
 
-    decoder_model = SamOnnxModel(model=sam, hq_token_only=False, multimask_output=False)
+    decoder_model = SamOnnxModel(
+        model=sam,
+        hq_token_only=False,
+        multimask_output=False,
+        skip_mask_postprocessing=skip_mask_postprocessing,
+    )
     decoder_model.eval()
 
     encoder_model = SamTinyImageEncoderOnnxModel(sam)
@@ -255,7 +262,14 @@ def export_and_validate(
             dynamo=False,
         )
 
-    providers = ["CPUExecutionProvider"]
+    available_providers = onnxruntime.get_available_providers()
+    missing_providers = [provider for provider in providers if provider not in available_providers]
+    if missing_providers:
+        raise RuntimeError(
+            f"Requested ONNX Runtime providers are unavailable: {missing_providers}. "
+            f"Available providers: {available_providers}"
+        )
+    print(f"Using ONNX Runtime providers: {providers}")
     encoder_ort = onnxruntime.InferenceSession(encoder_output, providers=providers)
     decoder_ort = onnxruntime.InferenceSession(decoder_output, providers=providers)
 
@@ -290,9 +304,16 @@ def export_and_validate(
     decoder_inputs_from_ort_encoder["image_embeddings"] = ort_encoder_outputs[0]
     decoder_inputs_from_ort_encoder["interm_embeddings"] = ort_encoder_outputs[1]
     ort_pipeline_outputs = decoder_ort.run(None, decoder_inputs_from_ort_encoder)
+    predictor_reference_outputs = predictor_outputs
+    if skip_mask_postprocessing:
+        predictor_reference_outputs = (
+            predictor_outputs[2],
+            predictor_outputs[1],
+            predictor_outputs[2],
+        )
     _check_outputs_close(
         names=["masks", "iou_predictions", "low_res_masks"],
-        pt_outputs=predictor_outputs,
+        pt_outputs=predictor_reference_outputs,
         ort_outputs=ort_pipeline_outputs,
         atol=atol,
         rtol=rtol,
@@ -444,6 +465,20 @@ def main():
     parser.add_argument("--atol", type=float, default=1e-3, help="Absolute tolerance for parity.")
     parser.add_argument("--rtol", type=float, default=1e-3, help="Relative tolerance for parity.")
     parser.add_argument(
+        "--providers",
+        nargs="+",
+        default=["CPUExecutionProvider"],
+        help="ONNX Runtime execution providers to use in order, e.g. DmlExecutionProvider CPUExecutionProvider.",
+    )
+    parser.add_argument(
+        "--skip-mask-postprocessing",
+        action="store_true",
+        help=(
+            "Skip high-resolution mask postprocessing inside the exported decoder and emit low-res mask logits "
+            "for both 'masks' and 'low_res_masks'. Useful for runtimes where dynamic resize/slice ops are unstable."
+        ),
+    )
+    parser.add_argument(
         "--benchmark-warmup",
         type=int,
         default=3,
@@ -474,6 +509,8 @@ def main():
         rtol=args.rtol,
         benchmark_warmup=args.benchmark_warmup,
         benchmark_runs=args.benchmark_runs,
+        providers=args.providers,
+        skip_mask_postprocessing=args.skip_mask_postprocessing,
     )
 
 

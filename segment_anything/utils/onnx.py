@@ -29,6 +29,7 @@ class SamOnnxModel(nn.Module):
         multimask_output: bool = False,
         use_stability_score: bool = False,
         return_extra_metrics: bool = False,
+        skip_mask_postprocessing: bool = False,
     ) -> None:
         super().__init__()
         self.mask_decoder = model.mask_decoder
@@ -39,6 +40,7 @@ class SamOnnxModel(nn.Module):
         self.use_stability_score = use_stability_score
         self.stability_score_offset = 1.0
         self.return_extra_metrics = return_extra_metrics
+        self.skip_mask_postprocessing = skip_mask_postprocessing
 
     @staticmethod
     def resize_longest_image_size(
@@ -143,7 +145,10 @@ class SamOnnxModel(nn.Module):
         else:
             masks = masks_sam + masks_hq
 
-        upscaled_masks = self.mask_postprocessing(masks, orig_im_size)
+        if self.skip_mask_postprocessing:
+            upscaled_masks = masks
+        else:
+            upscaled_masks = self.mask_postprocessing(masks, orig_im_size)
 
         if self.return_extra_metrics:
             stability_scores = calculate_stability_score(
