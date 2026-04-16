@@ -304,16 +304,17 @@ def export_and_validate(
     decoder_inputs_from_ort_encoder["image_embeddings"] = ort_encoder_outputs[0]
     decoder_inputs_from_ort_encoder["interm_embeddings"] = ort_encoder_outputs[1]
     ort_pipeline_outputs = decoder_ort.run(None, decoder_inputs_from_ort_encoder)
-    predictor_reference_outputs = predictor_outputs
+    parity_reference_outputs = predictor_outputs
     if skip_mask_postprocessing:
-        predictor_reference_outputs = (
+        # In DML-safe mode the decoder's first output ("masks") also carries low-res logits.
+        parity_reference_outputs = (
             predictor_outputs[2],
             predictor_outputs[1],
             predictor_outputs[2],
         )
     _check_outputs_close(
         names=["masks", "iou_predictions", "low_res_masks"],
-        pt_outputs=predictor_reference_outputs,
+        pt_outputs=parity_reference_outputs,
         ort_outputs=ort_pipeline_outputs,
         atol=atol,
         rtol=rtol,
