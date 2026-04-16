@@ -54,3 +54,50 @@ jobs:
             artifacts/sam_hq_vit_b_decoder.onnx
             artifacts/sam_hq_vit_b_encoder.onnx
           if-no-files-found: error
+
+  validate-directml:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip uninstall -y onnxruntime
+          python -m pip install onnx onnxscript onnxruntime-directml timm
+
+      - name: Export and validate DirectML-safe sam-hq-vit-tiny ONNX
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          $ckpt = Join-Path $env:RUNNER_TEMP "sam_hq_vit_tiny.pth"
+          python scripts/export_tiny_onnx_and_validate.py `
+            --model-type vit_tiny `
+            --checkpoint $ckpt `
+            --output artifacts/sam_hq_vit_tiny_decoder_dml.onnx `
+            --encoder-output artifacts/sam_hq_vit_tiny_encoder_dml.onnx `
+            --image demo/input_imgs/dog.jpg `
+            --providers DmlExecutionProvider `
+            --skip-mask-postprocessing `
+            # DirectML can exhibit larger numeric drift than CPU ORT on this model.
+            --atol 5e-2 `
+            --rtol 5e-2
+
+      - name: Upload DirectML ONNX artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sam-hq-onnx-directml
+          path: |
+            artifacts/sam_hq_vit_tiny_decoder_dml.onnx
+            artifacts/sam_hq_vit_tiny_encoder_dml.onnx
+          if-no-files-found: error
