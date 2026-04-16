@@ -306,7 +306,7 @@ def export_and_validate(
     ort_pipeline_outputs = decoder_ort.run(None, decoder_inputs_from_ort_encoder)
     parity_reference_outputs = predictor_outputs
     if skip_mask_postprocessing:
-        # In DML-safe mode the decoder's first output ("masks") also carries low-res logits.
+        # In DML-safe mode the decoder emits low-res logits for both "masks" and "low_res_masks".
         parity_reference_outputs = (
             predictor_outputs[2],
             predictor_outputs[1],
