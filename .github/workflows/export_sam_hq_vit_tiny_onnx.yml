@@ -22,7 +22,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
-          python -m pip install onnx onnxruntime onnxscript timm
+          python -m pip install numpy onnx onnxruntime onnxscript timm
+
+      - name: Download model checkpoints
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sam-hq-vit-tiny /tmp/sam-hq-vit-b
+          if [ ! -f /tmp/sam-hq-vit-tiny/sam_hq_vit_tiny.pth ]; then
+            curl -L -o /tmp/sam-hq-vit-tiny/sam_hq_vit_tiny.pth \
+              https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_tiny.pth
+          fi
+          if [ ! -f /tmp/sam-hq-vit-b/sam_hq_vit_b.pth ]; then
+            curl -L -o /tmp/sam-hq-vit-b/sam_hq_vit_b.pth \
+              https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_b.pth
+          fi
 
       - name: Export and validate sam-hq-vit-tiny ONNX
         run: |
@@ -32,7 +45,10 @@ jobs:
             --checkpoint /tmp/sam-hq-vit-tiny/sam_hq_vit_tiny.pth \
             --output artifacts/sam_hq_vit_tiny_decoder.onnx \
             --encoder-output artifacts/sam_hq_vit_tiny_encoder.onnx \
-            --image demo/input_imgs/dog.jpg
+            --image demo/input_imgs/dog.jpg \
+            --decompose-encoder-layernorm \
+            --interm-embeddings-stacked \
+            --validate-batch 2
 
       - name: Export and validate sam-hq-vit-b ONNX
         run: |
@@ -42,7 +58,10 @@ jobs:
             --checkpoint /tmp/sam-hq-vit-b/sam_hq_vit_b.pth \
             --output artifacts/sam_hq_vit_b_decoder.onnx \
             --encoder-output artifacts/sam_hq_vit_b_encoder.onnx \
-            --image demo/input_imgs/dog.jpg
+            --image demo/input_imgs/dog.jpg \
+            --decompose-encoder-layernorm \
+            --interm-embeddings-stacked \
+            --validate-batch 2
 
       - name: Upload ONNX artifacts
         uses: actions/upload-artifact@v4
@@ -73,8 +92,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
+          python -m pip install numpy
           python -m pip uninstall -y onnxruntime
           python -m pip install onnx onnxscript onnxruntime-directml timm
+
+      - name: Download vit_tiny checkpoint
+        shell: pwsh
+        run: |
+          $ckpt = Join-Path $env:RUNNER_TEMP "sam_hq_vit_tiny.pth"
+          if (-not (Test-Path $ckpt)) {
+            $url = "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_tiny.pth"
+            Invoke-WebRequest -Uri $url -OutFile $ckpt
+          }
 
       - name: Export and validate DirectML-safe sam-hq-vit-tiny ONNX
         shell: pwsh
@@ -87,6 +116,9 @@ jobs:
             --output artifacts/sam_hq_vit_tiny_decoder_dml.onnx `
             --encoder-output artifacts/sam_hq_vit_tiny_encoder_dml.onnx `
             --image demo/input_imgs/dog.jpg `
+            --decompose-encoder-layernorm `
+            --interm-embeddings-stacked `
+            --validate-batch 2 `
             --providers DmlExecutionProvider `
             --skip-mask-postprocessing `
             # DirectML can exhibit larger numeric drift than CPU ORT on this model.

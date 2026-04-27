@@ -133,8 +133,12 @@ def run_export(
                 m.approximate = "tanh"
 
     dynamic_axes = {
-        "point_coords": {1: "num_points"},
-        "point_labels": {1: "num_points"},
+        "point_coords": {0: "num_prompt_groups", 1: "num_points"},
+        "point_labels": {0: "num_prompt_groups", 1: "num_points"},
+        "mask_input": {0: "num_prompt_groups"},
+        "has_mask_input": {0: "num_prompt_groups"},
+        "orig_im_size": {0: "num_prompt_groups"},
+        "padded_im_size": {0: "num_prompt_groups"},
     }
 
     embed_dim = sam.prompt_encoder.embed_dim
@@ -166,7 +170,8 @@ def run_export(
         "point_labels": torch.randint(low=0, high=4, size=(1, 5), dtype=torch.float),
         "mask_input": torch.randn(1, 1, *mask_input_size, dtype=torch.float),
         "has_mask_input": torch.tensor([1], dtype=torch.float),
-        "orig_im_size": torch.tensor([1500, 2250], dtype=torch.float),
+        "orig_im_size": torch.tensor([[1500.0, 2250.0]], dtype=torch.float),
+        "padded_im_size": torch.tensor([[682.0, 1024.0]], dtype=torch.float),
     }
 
     _ = onnx_model(**dummy_inputs)
