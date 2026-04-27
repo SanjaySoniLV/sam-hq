@@ -1,7 +1,11 @@
 import argparse
 import os
+import shutil
+import subprocess
+import sys
 import time
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable, Sequence, Tuple
 
 import numpy as np
@@ -12,6 +16,8 @@ from torchvision.io import ImageReadMode, read_image
 
 from segment_anything import SamPredictor, sam_model_registry
 from segment_anything.utils.onnx import SamOnnxModel
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 DEFAULT_CHECKPOINT_URLS = {
@@ -91,9 +97,10 @@ def _build_parity_inputs(sam, image: np.ndarray):
         raise RuntimeError("SamPredictor did not produce intermediate embeddings after set_image.")
 
     image_embeddings = predictor.features
-    interm_embeddings = torch.stack(predictor.interm_features, dim=0)
+    interm_embeddings = torch.stack(predictor.interm_features, dim=0)  # (L, 1, H, W, C)
 
     h, w = image.shape[:2]
+    _, _, ph, pw = input_image_torch.shape
     point_coords_unscaled = np.array(
         [[w * x_rel, h * y_rel] for x_rel, y_rel in DEFAULT_DOG_IMAGE_PROMPT_POINTS],
         dtype=np.float32,
@@ -104,7 +111,8 @@ def _build_parity_inputs(sam, image: np.ndarray):
     point_labels = torch.as_tensor(point_labels_np, dtype=torch.float32, device=sam.device)[None, :]
     mask_input = torch.zeros((1, 1, 256, 256), dtype=torch.float32, device=sam.device)
     has_mask_input = torch.tensor([0.0], dtype=torch.float32, device=sam.device)
-    orig_im_size = torch.tensor([float(h), float(w)], dtype=torch.float32, device=sam.device)
+    orig_im_size = torch.tensor([[float(h), float(w)]], dtype=torch.float32, device=sam.device)
+    padded_im_size = torch.tensor([[float(ph), float(pw)]], dtype=torch.float32, device=sam.device)
 
     decoder_inputs = {
         "image_embeddings": image_embeddings,
@@ -114,6 +122,7 @@ def _build_parity_inputs(sam, image: np.ndarray):
         "mask_input": mask_input,
         "has_mask_input": has_mask_input,
         "orig_im_size": orig_im_size,
+        "padded_im_size": padded_im_size,
     }
 
     with torch.no_grad():
@@ -132,6 +141,70 @@ def _build_parity_inputs(sam, image: np.ndarray):
         "decoder_inputs": decoder_inputs,
         "predictor_outputs": predictor_outputs,
     }
+
+
+def _decoder_inputs_with_batch(
+    decoder_inputs: dict, batch_size: int
+) -> dict:
+    """Batch multiple prompt groups on a single image (matches SAM mask_decoder.repeat_interleave).
+
+    `image_embeddings` and `interm_embeddings` stay batch-1; only point/mask and size fields tile.
+    """
+    if batch_size <= 1:
+        return decoder_inputs
+    out = dict(decoder_inputs)
+    for k in (
+        "point_coords",
+        "point_labels",
+        "mask_input",
+        "has_mask_input",
+    ):
+        v = decoder_inputs[k]
+        out[k] = v.expand(batch_size, *v.shape[1:]).contiguous()
+    oi = decoder_inputs["orig_im_size"]
+    pd = decoder_inputs["padded_im_size"]
+    if oi.dim() == 1:
+        out["orig_im_size"] = oi.unsqueeze(0).expand(batch_size, 2).contiguous()
+    else:
+        out["orig_im_size"] = oi.expand(batch_size, 2).contiguous()
+    if pd.dim() == 1:
+        out["padded_im_size"] = pd.unsqueeze(0).expand(batch_size, 2).contiguous()
+    else:
+        out["padded_im_size"] = pd.expand(batch_size, 2).contiguous()
+    return out
+
+
+def _decoder_inputs_slice_index(dec: dict, index: int, expected_batch: int) -> dict:
+    out: dict = {}
+    for k, v in dec.items():
+        if k == "interm_embeddings" and v.dim() == 5 and v.shape[1] == expected_batch:
+            out[k] = v[:, index : index + 1, ...]
+        elif v.dim() >= 1 and v.shape[0] == expected_batch:
+            out[k] = v[index : index + 1, ...]
+        else:
+            out[k] = v
+    return out
+
+
+def _patch_encoder_layernorm_inplace(encoder_onnx: Path) -> None:
+    """Run LayerNorm decomp script in-place: backup original, write patched, replace."""
+    orig = encoder_onnx.with_name(encoder_onnx.stem + ".unpatched" + encoder_onnx.suffix)
+    shutil.copy2(encoder_onnx, orig)
+    tmp_out = encoder_onnx.with_name(encoder_onnx.stem + ".ln_decomp_tmp" + encoder_onnx.suffix)
+    script = REPO_ROOT / "scripts" / "rewrite_encoder_layernorm_to_primitive_ops.py"
+    r = subprocess.run(
+        [sys.executable, str(script), str(orig), str(tmp_out)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            "LayerNorm rewrite failed.\n"
+            f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        )
+    shutil.move(str(tmp_out), str(encoder_onnx))
+    print(f"Encoder LayerNorm decomposed in-place: {encoder_onnx} (backup: {orig.name})")
 
 
 def _check_outputs_close(
@@ -190,6 +263,9 @@ def export_and_validate(
     benchmark_runs: int,
     providers: Sequence[str],
     skip_mask_postprocessing: bool,
+    interm_embeddings_stacked: bool,
+    decompose_encoder_layernorm: bool,
+    validate_batch: int,
 ) -> None:
     checkpoint_url = checkpoint_url or DEFAULT_CHECKPOINT_URLS[model_type]
     _download_if_needed(checkpoint_path, checkpoint_url)
@@ -219,6 +295,8 @@ def export_and_validate(
     encoder_input_image = parity_data["encoder_input_image"]
     decoder_inputs = parity_data["decoder_inputs"]
     predictor_outputs = parity_data["predictor_outputs"]
+    if not interm_embeddings_stacked:
+        decoder_inputs["interm_embeddings"] = decoder_inputs["interm_embeddings"][0]
 
     _ = encoder_model(encoder_input_image)
     _ = decoder_model(**decoder_inputs)
@@ -227,6 +305,7 @@ def export_and_validate(
     os.makedirs(os.path.dirname(encoder_output) or ".", exist_ok=True)
 
     print(f"Exporting encoder ONNX to {encoder_output} ...")
+    encoder_dynamic = {"input_image": {0: "batch"}}
     with open(encoder_output, "wb") as f:
         torch.onnx.export(
             encoder_model,
@@ -238,13 +317,27 @@ def export_and_validate(
             do_constant_folding=True,
             input_names=["input_image"],
             output_names=["image_embeddings", "interm_embeddings"],
+            dynamic_axes=encoder_dynamic,
             dynamo=False,
         )
+    if decompose_encoder_layernorm:
+        _patch_encoder_layernorm_inplace(Path(encoder_output))
 
-    dynamic_axes = {
-        "point_coords": {1: "num_points"},
-        "point_labels": {1: "num_points"},
+    if interm_embeddings_stacked:
+        # Encoder output is (L,1,H,W,C); first dim is layer, second is always 1 for this export path
+        interm_dec_dyn = {0: "interm_layer"}
+    else:
+        interm_dec_dyn = {0: "batch"}
+    dynamic_axes: dict = {
+        "point_coords": {0: "num_prompt_groups", 1: "num_points"},
+        "point_labels": {0: "num_prompt_groups", 1: "num_points"},
+        "mask_input": {0: "num_prompt_groups"},
+        "has_mask_input": {0: "num_prompt_groups"},
+        "orig_im_size": {0: "num_prompt_groups"},
+        "padded_im_size": {0: "num_prompt_groups"},
     }
+    if not interm_embeddings_stacked:
+        dynamic_axes["interm_embeddings"] = interm_dec_dyn
 
     print(f"Exporting decoder ONNX to {decoder_output} ...")
     with open(decoder_output, "wb") as f:
@@ -275,6 +368,34 @@ def export_and_validate(
 
     encoder_ort_inputs = {"input_image": _to_numpy(encoder_input_image)}
     decoder_ort_inputs = {k: _to_numpy(v) for k, v in decoder_inputs.items()}
+
+    if decompose_encoder_layernorm:
+        unpatched_path = (
+            Path(encoder_output).with_name(
+                Path(encoder_output).stem + ".unpatched" + Path(encoder_output).suffix
+            )
+        )
+        if unpatched_path.is_file():
+            print(
+                f"Comparing ORT encoder outputs: unpatched ({unpatched_path.name}) vs LayerNorm-decomposed (active)..."
+            )
+            ort_unpatched = onnxruntime.InferenceSession(
+                str(unpatched_path), providers=providers
+            )
+            out_un = ort_unpatched.run(None, encoder_ort_inputs)
+            out_p = encoder_ort.run(None, encoder_ort_inputs)
+            for name, a, b in zip(
+                ["image_embeddings", "interm_embeddings"], out_un, out_p
+            ):
+                max_abs = float(np.max(np.abs(a - b)))
+                is_close = np.allclose(a, b, atol=1e-4, rtol=1e-4)
+                print(
+                    f"encoder.unpatched_vs_ln_decomp.{name}: max_abs_diff={max_abs:.8e}, allclose(1e-4)={is_close}"
+                )
+                if not is_close:
+                    raise RuntimeError(
+                        f"LayerNorm decomp changed encoder {name} beyond 1e-4 tolerance: max_abs={max_abs}"
+                    )
 
     with torch.no_grad():
         pt_encoder_outputs = encoder_model(encoder_input_image)
@@ -330,6 +451,55 @@ def export_and_validate(
         prefix="pipeline",
     )
 
+    if validate_batch > 1:
+        print(
+            f"Validating {validate_batch} prompt groups on one image (decoder batch / "
+            "num_prompt_groups axis)..."
+        )
+        dec_b = _decoder_inputs_with_batch(decoder_inputs, validate_batch)
+        with torch.no_grad():
+            pt_b = decoder_model(**dec_b)
+        dec_ort_b = {k: _to_numpy(v) for k, v in dec_b.items()}
+        ort_b = decoder_ort.run(None, dec_ort_b)
+        _check_outputs_close(
+            names=["masks", "iou_predictions", "low_res_masks"],
+            pt_outputs=pt_b,
+            ort_outputs=ort_b,
+            atol=atol,
+            rtol=rtol,
+            prefix=f"decoder.batch{validate_batch}",
+        )
+        enc_out_b = encoder_ort.run(None, encoder_ort_inputs)
+        dec_from_enc_b = dict(dec_ort_b)
+        dec_from_enc_b["image_embeddings"] = enc_out_b[0]
+        dec_from_enc_b["interm_embeddings"] = enc_out_b[1]
+        ort_pipe_b = decoder_ort.run(None, dec_from_enc_b)
+        _check_outputs_close(
+            names=["masks", "iou_predictions", "low_res_masks"],
+            pt_outputs=pt_b,
+            ort_outputs=ort_pipe_b,
+            atol=atol,
+            rtol=rtol,
+            prefix=f"pipeline.batch{validate_batch}",
+        )
+        for i in range(validate_batch):
+            dec_i = _decoder_inputs_slice_index(dec_b, i, validate_batch)
+            with torch.no_grad():
+                pt_i = decoder_model(**dec_i)
+            for j, name in enumerate(["masks", "iou_predictions", "low_res_masks"]):
+                ai = _to_numpy(pt_i[j])
+                bi = _to_numpy(pt_b[j][i : i + 1])
+                max_abs = float(np.max(np.abs(ai - bi)))
+                is_close = np.allclose(ai, bi, atol=atol, rtol=rtol)
+                print(
+                    f"batch_parity.slice[{i}].{name}: max_abs_diff={max_abs:.8f}, allclose={is_close}"
+                )
+                if not is_close:
+                    raise RuntimeError(
+                        f"Batched output batch index {i} does not match independent run for {name}. "
+                        f"max_abs_diff={max_abs}, atol={atol}, rtol={rtol}"
+                    )
+
     def _pt_encoder_run():
         with torch.no_grad():
             encoder_model(encoder_input_image)
@@ -375,6 +545,7 @@ def export_and_validate(
                 mask_input=decoder_inputs["mask_input"],
                 has_mask_input=decoder_inputs["has_mask_input"],
                 orig_im_size=decoder_inputs["orig_im_size"],
+                padded_im_size=decoder_inputs["padded_im_size"],
             )
 
     def _ort_pipeline_run():
@@ -492,6 +663,33 @@ def main():
         default=20,
         help="Number of timed runs for performance comparison.",
     )
+    parser.add_argument(
+        "--interm-embeddings-stacked",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "If true, interm_embeddings has shape (L,B,H,W,C) matching the encoder export. "
+            "If false, use (B,H,W,C) for a single intermediate map (legacy)."
+        ),
+    )
+    parser.add_argument(
+        "--decompose-encoder-layernorm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Rewrite LayerNormalization in the encoder ONNX to primitive ops (DirectML fix). "
+            "Saves a .unpatched copy next to the encoder for diff validation."
+        ),
+    )
+    parser.add_argument(
+        "--validate-batch",
+        type=int,
+        default=2,
+        help=(
+            "If >1, validate that many parallel prompt groups on a single image (matches "
+            "how the SAM decoder uses its batch / num_prompt_groups axis). Set to 1 to skip."
+        ),
+    )
     args = parser.parse_args()
     checkpoint_path = args.checkpoint or f"/tmp/sam-hq-{args.model_type}/sam_hq_{args.model_type}.pth"
     decoder_output = args.output or f"/tmp/sam-hq-{args.model_type}/sam_hq_{args.model_type}_decoder.onnx"
@@ -513,6 +711,9 @@ def main():
         benchmark_runs=args.benchmark_runs,
         providers=args.providers,
         skip_mask_postprocessing=args.skip_mask_postprocessing,
+        interm_embeddings_stacked=args.interm_embeddings_stacked,
+        decompose_encoder_layernorm=args.decompose_encoder_layernorm,
+        validate_batch=args.validate_batch,
     )
 
 

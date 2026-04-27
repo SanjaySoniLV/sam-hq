@@ -53,45 +53,74 @@ class SamOnnxModel(nn.Module):
         return transformed_size
 
     def _embed_points(self, point_coords: torch.Tensor, point_labels: torch.Tensor) -> torch.Tensor:
-        point_coords = point_coords + 0.5
-        point_coords = point_coords / self.img_size
-        point_embedding = self.model.prompt_encoder.pe_layer._pe_encoding(point_coords)
-        point_labels = point_labels.unsqueeze(-1).expand_as(point_embedding)
-
-        point_embedding = point_embedding * (point_labels != -1)
-        point_embedding = point_embedding + self.model.prompt_encoder.not_a_point_embed.weight * (
-            point_labels == -1
+        """Match `PromptEncoder` when `boxes is None` (padded last point) without indexed writes that break ONNX."""
+        pl = point_labels.to(torch.float32)
+        padding_point = torch.zeros((point_coords.shape[0], 1, 2), device=point_coords.device, dtype=point_coords.dtype)
+        padding_label = torch.full((pl.shape[0], 1), -1.0, device=pl.device, dtype=pl.dtype)
+        coords = torch.cat([point_coords, padding_point], dim=1)
+        labels = torch.cat([pl, padding_label], dim=1)
+        coords = coords + 0.5
+        pe = self.model.prompt_encoder.pe_layer.forward_with_coords(
+            coords, self.model.prompt_encoder.input_image_size
         )
-
+        le = labels.unsqueeze(-1).expand_as(pe)
+        not_w = self.model.prompt_encoder.not_a_point_embed.weight
+        out = pe * (le != -1) + not_w * (le == -1)
         for i in range(self.model.prompt_encoder.num_point_embeddings):
-            point_embedding = point_embedding + self.model.prompt_encoder.point_embeddings[
-                i
-            ].weight * (point_labels == i)
-
-        return point_embedding
+            w = self.model.prompt_encoder.point_embeddings[i].weight
+            out = out + w * (le == float(i))
+        return out
 
     def _embed_masks(self, input_mask: torch.Tensor, has_mask_input: torch.Tensor) -> torch.Tensor:
+        if has_mask_input.dim() == 1:
+            has_mask_input = has_mask_input.view(-1, 1, 1, 1)
+        else:
+            has_mask_input = has_mask_input.view(has_mask_input.shape[0], 1, 1, 1)
         mask_embedding = has_mask_input * self.model.prompt_encoder.mask_downscaling(input_mask)
-        mask_embedding = mask_embedding + (
-            1 - has_mask_input
-        ) * self.model.prompt_encoder.no_mask_embed.weight.reshape(1, -1, 1, 1)
+        no_mask = self.model.prompt_encoder.no_mask_embed.weight.reshape(1, -1, 1, 1)
+        mask_embedding = mask_embedding + (1 - has_mask_input) * no_mask
         return mask_embedding
 
-    def mask_postprocessing(self, masks: torch.Tensor, orig_im_size: torch.Tensor) -> torch.Tensor:
+    def mask_postprocessing(
+        self,
+        masks: torch.Tensor,
+        orig_im_size: torch.Tensor,
+        padded_im_size: torch.Tensor,
+    ) -> torch.Tensor:
+        """Match Sam.postprocess_masks: crop to `padded` (H,W) then upscale to `orig` (H,W).
+
+        `padded_im_size` and `orig_im_size` are (B,2) in (H, W) order, matching SamPredictor.
+        For a batch, we assume the same (H, W) pair for all elements (typical for batched same-shape images).
+        """
+        if orig_im_size.dim() == 1:
+            oi = orig_im_size.unsqueeze(0)
+        else:
+            oi = orig_im_size
+        if padded_im_size.dim() == 1:
+            pad = padded_im_size.unsqueeze(0)
+        else:
+            pad = padded_im_size
+        b = oi.shape[0]
+        ph = pad[0, 0].to(torch.int64)
+        pw = pad[0, 1].to(torch.int64)
+        h0 = oi[0, 0].to(torch.int64)
+        w0 = oi[0, 1].to(torch.int64)
+        if b != 1 and (b != pad.shape[0] or b != oi.shape[0]):
+            raise ValueError("orig_im_size and padded_im_size must match mask batch and each other")
+        for i in range(1, b):
+            if (pad[i, 0] != ph) or (pad[i, 1] != pw) or (oi[i, 0] != h0) or (oi[i, 1] != w0):
+                raise NotImplementedError(
+                    "Batched postprocessing for mixed (H, W) per item is not supported; "
+                    "use the same size for every batch element or run one image at a time."
+                )
         masks = F.interpolate(
             masks,
             size=(self.img_size, self.img_size),
             mode="bilinear",
             align_corners=False,
         )
-
-        prepadded_size = self.resize_longest_image_size(orig_im_size, self.img_size).to(torch.int64)
-        masks = masks[..., : prepadded_size[0], : prepadded_size[1]]  # type: ignore
-
-        orig_im_size = orig_im_size.to(torch.int64)
-        h, w = orig_im_size[0], orig_im_size[1]
-        masks = F.interpolate(masks, size=(h, w), mode="bilinear", align_corners=False)
-        return masks
+        masks = masks[:, :, :ph, :pw]  # type: ignore[index]
+        return F.interpolate(masks, (h0, w0), mode="bilinear", align_corners=False)
 
 
     @torch.no_grad()
@@ -104,11 +133,22 @@ class SamOnnxModel(nn.Module):
         mask_input: torch.Tensor,
         has_mask_input: torch.Tensor,
         orig_im_size: torch.Tensor,
+        padded_im_size: torch.Tensor,
     ):
         sparse_embedding = self._embed_points(point_coords, point_labels)
         dense_embedding = self._embed_masks(mask_input, has_mask_input)
 
-        vit_features = interm_embeddings[0].permute(0, 3, 1, 2) # early-layer ViT feature, after 1st global attention block in ViT
+        if interm_embeddings.dim() == 5:
+            # (num_layers, B, H, W, C); HQ uses the first intermediate ViT feature map
+            vit_tok = interm_embeddings[0]
+        elif interm_embeddings.dim() == 4:
+            # Single layer, batched: (B, H, W, C)
+            vit_tok = interm_embeddings
+        else:
+            raise ValueError(
+                f"interm_embeddings must be 4D or 5D, got shape {tuple(interm_embeddings.shape)}"
+            )
+        vit_features = vit_tok.permute(0, 3, 1, 2)  # early-layer ViT feature
         hq_features = self.model.mask_decoder.embedding_encoder(image_embeddings) + self.model.mask_decoder.compress_vit_feat(vit_features)
 
         masks, scores = self.model.mask_decoder.predict_masks(
@@ -148,7 +188,7 @@ class SamOnnxModel(nn.Module):
         if self.skip_mask_postprocessing:
             upscaled_masks = masks
         else:
-            upscaled_masks = self.mask_postprocessing(masks, orig_im_size)
+            upscaled_masks = self.mask_postprocessing(masks, orig_im_size, padded_im_size)
 
         if self.return_extra_metrics:
             stability_scores = calculate_stability_score(
